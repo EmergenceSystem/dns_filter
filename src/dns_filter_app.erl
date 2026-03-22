@@ -1,6 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% @doc
-%%% DNS Lookup Agent for the Emergence System
+%%% @doc DNS Lookup Agent for the Emergence System.
 %%%
 %%% Resolves A, AAAA, MX, NS, TXT and CNAME records for a domain.
 %%% Accepts either a bare domain ("google.com") or free text
@@ -9,7 +8,11 @@
 %%% Results are cached in ETS for CACHE_TTL_S seconds so repeated
 %%% queries for the same domain skip the network round-trip.
 %%%
-%%% @author Steve Roques
+%%% === Capability cascade ===
+%%%
+%%%   base_capabilities/0 extends em_filter:base_capabilities().
+%%%
+%%% Handler contract: handle/2 (Body, Memory) -> {RawList, Memory}.
 %%% @end
 %%%-------------------------------------------------------------------
 -module(dns_filter_app).
@@ -18,20 +21,18 @@
 -include_lib("kernel/include/inet.hrl").
 
 -export([start/2, stop/1]).
--export([handle/2]).
+-export([handle/2, base_capabilities/0]).
 
-%% Cache TTL in seconds
--define(CACHE_TTL_S, 60).
-
-%% DNS record types to resolve
+-define(CACHE_TTL_S,  60).
 -define(RECORD_TYPES, [a, aaaa, mx, ns, txt, cname]).
 
-%% Capabilities advertised to em_disco
--define(CAPABILITIES, [
-    <<"dns">>,
-    <<"resolve">>,
-    <<"network">>
-]).
+%%====================================================================
+%% Capability cascade
+%%====================================================================
+
+-spec base_capabilities() -> [binary()].
+base_capabilities() ->
+    em_filter:base_capabilities() ++ [<<"dns">>, <<"resolve">>, <<"network">>].
 
 %%====================================================================
 %% Application lifecycle
@@ -39,9 +40,10 @@
 
 start(_Type, _Args) ->
     em_filter:start_agent(dns_filter, ?MODULE, #{
-        capabilities => ?CAPABILITIES,
-        memory       => ets          %% survives worker restarts within the session
-    }).
+        capabilities => base_capabilities(),
+        memory       => ets
+    }),
+    {ok, self()}.
 
 stop(_State) ->
     em_filter:stop_agent(dns_filter).
@@ -76,14 +78,6 @@ handle(Body, Memory) ->
 %% Domain extraction
 %%====================================================================
 
-%%--------------------------------------------------------------------
-%% @doc Extracts a domain from the query body.
-%%
-%% Tries an exact match first (bare domain like "google.com").
-%% Falls back to scanning the text for the first domain-like token,
-%% which handles free-text queries such as "website of google.com".
-%% @end
-%%--------------------------------------------------------------------
 -spec extract_domain(binary()) -> binary() | undefined.
 extract_domain(Body) ->
     Str = string:trim(binary_to_list(Body)),
@@ -93,7 +87,6 @@ extract_domain(Body) ->
         match ->
             list_to_binary(string:to_lower(Str));
         nomatch ->
-            %% Try to extract the first domain-like token from free text.
             case re:run(Str,
                     "[a-zA-Z0-9][a-zA-Z0-9\\-]*(\\.[a-zA-Z]{2,})+",
                     [{capture, first, list}]) of
@@ -124,10 +117,6 @@ safe_resolve(Type, Domain) ->
         false
     end.
 
-%%--------------------------------------------------------------------
-%% Per-type resolvers
-%%--------------------------------------------------------------------
-
 resolve(a, Domain) ->
     case inet:gethostbyname(binary_to_list(Domain)) of
         {ok, HostEnt} ->
@@ -147,45 +136,23 @@ resolve(cname, Domain) -> resolve_with_inet_res(Domain, cname, <<"dns_cname">>).
 
 resolve_with_inet_res(Domain, Type, Label) ->
     case inet_res:lookup(binary_to_list(Domain), in, Type) of
-        [] ->
-            undefined;
+        []      -> undefined;
         Results ->
             Values = [format_record(Type, R) || R <- Results],
             embryo(Domain, Label, #{<<"values">> => Values})
     end.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc Formats a raw inet_res record into a human-readable binary.
-%%
-%% MX  → "10 aspmx.l.google.com"
-%% TXT → concatenated strings
-%% NS/CNAME → plain string
-%% Fallback → Erlang term as string (safe but verbose)
-%% @end
-%%--------------------------------------------------------------------
 -spec format_record(atom(), term()) -> binary().
-format_record(mx, {Prio, Host}) ->
-    iolist_to_binary([integer_to_list(Prio), " ", Host]);
-format_record(txt, Strings) when is_list(Strings) ->
-    iolist_to_binary(Strings);
-format_record(_Type, R) when is_list(R) ->
-    list_to_binary(R);
-format_record(_Type, R) when is_binary(R) ->
-    R;
-format_record(_Type, R) ->
-    iolist_to_binary(io_lib:format("~p", [R])).
-
-%%====================================================================
-%% Embryo builder
-%%====================================================================
+format_record(mx,  {Prio, Host})           -> iolist_to_binary([integer_to_list(Prio), " ", Host]);
+format_record(txt, Strings) when is_list(Strings) -> iolist_to_binary(Strings);
+format_record(_,   R) when is_list(R)      -> list_to_binary(R);
+format_record(_,   R) when is_binary(R)    -> R;
+format_record(_,   R)                      -> iolist_to_binary(io_lib:format("~p", [R])).
 
 -spec embryo(binary(), binary(), map()) -> map().
 embryo(Domain, Type, Props) ->
-    #{
-        <<"type">>       => Type,
-        <<"properties">> => Props#{<<"domain">> => Domain}
-    }.
+    #{<<"type">>       => Type,
+      <<"properties">> => Props#{<<"domain">> => Domain}}.
 
 %%====================================================================
 %% Cache
@@ -195,10 +162,8 @@ embryo(Domain, Type, Props) ->
 cache_get(Domain, Memory) ->
     Now = erlang:system_time(second),
     case maps:get({dns, Domain}, Memory, undefined) of
-        {Embryos, Expiry} when Expiry > Now ->
-            {hit, Embryos, Memory};
-        _ ->
-            miss
+        {Embryos, Expiry} when Expiry > Now -> {hit, Embryos, Memory};
+        _                                   -> miss
     end.
 
 -spec cache_put(binary(), list(), map()) -> map().
