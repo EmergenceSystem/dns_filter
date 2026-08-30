@@ -1,5 +1,12 @@
 # DNS Filter Agent for Emergence System
 
+
+<!-- emergence-context -->
+Part of **[EmergenceSystem](https://github.com/EmergenceSystem)** — a distributed
+discovery network of small, single-source agents. This filter joins the em_pop gossip
+mesh and answers `POST /agent/query`; Emquest fans each query out to many filters in
+parallel and aggregates the results.
+
 ## Overview
 
 The **DNS Filter Agent** (`dns_filter_app`) is a lightweight DNS resolution component for the **Emergence System**. Its primary role is to resolve domain names and return structured DNS information (embryos) for further processing by other Emergence modules.
